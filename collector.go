@@ -31,6 +31,12 @@ var (
 	ipmiChassisPowerRegex        = regexp.MustCompile(`^System Power\s*:\s(?P<value>.*)`)
 	bmcInfoFirmwareRevisionRegex = regexp.MustCompile(`^Firmware Revision\s*:\s*(?P<value>[0-9.]*).*`)
 	bmcInfoManufacturerIDRegex   = regexp.MustCompile(`^Manufacturer ID\s*:\s*(?P<value>.*)`)
+	fruProductManufacturerRegex  = regexp.MustCompile(`^\s*FRU Product Manufacturer Name\s*:\s*(?P<value>.*)`)
+	fruProductModelRegex         = regexp.MustCompile(`^\s*FRU Product Part/Model Number\s*:\s*(?P<value>.*)`)
+	fruProductSerialRegex        = regexp.MustCompile(`^\s*FRU Product Serial Number:\s*(?P<value>.*)`)
+	fruBoardManufacturerRegex    = regexp.MustCompile(`^\s*FRU Board Manufacturer\s*:\s*(?P<value>.*)`)
+	fruBoardModelRegex           = regexp.MustCompile(`^\s*FRU Board Part Number\s*:\s*(?P<value>.*)`)
+	fruBoardSerialRegex          = regexp.MustCompile(`^\s*FRU Board Serial Number:\s*(?P<value>.*)`)
 )
 
 type collector struct {
@@ -160,6 +166,13 @@ var (
 		nil,
 	)
 
+	fruInfo = prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "fru", "info"),
+		"Constant metric with value '1' providing details about the FRU.",
+		[]string{"product_manufacturer", "product_model", "product_serial", "board_manufacturer", "board_model", "board_serial"},
+		nil,
+	)
+
 	upDesc = prometheus.NewDesc(
 		prometheus.BuildFQName(namespace, "", "up"),
 		"'1' if a scrape of the IPMI device was successful, '0' otherwise.",
@@ -263,6 +276,10 @@ func bmcInfoOutput(target ipmiTarget) ([]byte, error) {
 	return freeipmiOutput("bmc-info", target, "--get-device-id")
 }
 
+func fruInfoOutput(target ipmiTarget) ([]byte, error) {
+	return freeipmiOutput("ipmi-fru", target, "--workaround-flags=skipchecks")
+}
+
 func ipmiChassisOutput(target ipmiTarget) ([]byte, error) {
 	return freeipmiOutput("ipmi-chassis", target, "--get-chassis-status")
 }
@@ -352,8 +369,33 @@ func getBMCInfoManufacturerID(ipmiOutput []byte) (string, error) {
 	return getValue(ipmiOutput, bmcInfoManufacturerIDRegex)
 }
 
+func getFRUProductManufacturer(ipmiOutput []byte) (string, error) {
+	return getValue(ipmiOutput, fruProductManufacturerRegex)
+}
+
+func getFRUProductModel(ipmiOutput []byte) (string, error) {
+	return getValue(ipmiOutput, fruProductModelRegex)
+}
+
+func getFRUProductSerial(ipmiOutput []byte) (string, error) {
+	return getValue(ipmiOutput, fruProductSerialRegex)
+}
+
+func getFRUBoardManufacturer(ipmiOutput []byte) (string, error) {
+	return getValue(ipmiOutput, fruBoardManufacturerRegex)
+}
+
+func getFRUBoardModel(ipmiOutput []byte) (string, error) {
+	return getValue(ipmiOutput, fruBoardModelRegex)
+}
+
+func getFRUBoardSerial(ipmiOutput []byte) (string, error) {
+	return getValue(ipmiOutput, fruBoardSerialRegex)
+}
+
 // Describe implements Prometheus.Collector.
 func (c collector) Describe(ch chan<- *prometheus.Desc) {
+	ch <- fruInfo
 	ch <- sensorStateDesc
 	ch <- sensorValueDesc
 	ch <- fanSpeedDesc
@@ -414,7 +456,6 @@ func collectMonitoring(ch chan<- prometheus.Metric, target ipmiTarget) (int, err
 	}
 	for _, data := range results {
 		var state float64
-
 		switch data.State {
 		case "Nominal":
 			state = 0
@@ -512,6 +553,52 @@ func collectBmcInfo(ch chan<- prometheus.Metric, target ipmiTarget) (int, error)
 	return 1, nil
 }
 
+func collectFruInfo(ch chan<- prometheus.Metric, target ipmiTarget) (int, error) {
+	output, err := fruInfoOutput(target)
+	if err != nil {
+		log.Debugf("Failed to collect fru-info data from %s: %s", targetName(target.host), err)
+		return 0, err
+	}
+	fruProductManufacturer, err := getFRUProductManufacturer(output)
+	if err != nil {
+		log.Errorf("Failed to parse fru-info data from %s: %s", targetName(target.host), err)
+		return 0, err
+	}
+	fruProductModel, err := getFRUProductModel(output)
+	if err != nil {
+		log.Errorf("Failed to parse fru-info data from %s: %s", targetName(target.host), err)
+		return 0, err
+	}
+	fruProductSerial, err := getFRUProductSerial(output)
+	if err != nil {
+		log.Errorf("Failed to parse fru-info data from %s: %s", targetName(target.host), err)
+		return 0, err
+	}
+	fruBoardManufacturer, err := getFRUBoardManufacturer(output)
+	if err != nil {
+		log.Errorf("Failed to parse fru-info data from %s: %s", targetName(target.host), err)
+		return 0, err
+	}
+	fruBoardModel, err := getFRUBoardModel(output)
+	if err != nil {
+		log.Errorf("Failed to parse fru-info data from %s: %s", targetName(target.host), err)
+		return 0, err
+	}
+	fruBoardSerial, err := getFRUBoardSerial(output)
+	if err != nil {
+		log.Errorf("Failed to parse fru-info data from %s: %s", targetName(target.host), err)
+		return 0, err
+	}
+	ch <- prometheus.MustNewConstMetric(
+		fruInfo,
+		prometheus.GaugeValue,
+		1,
+		fruProductManufacturer, fruProductModel, fruProductSerial,
+		fruBoardManufacturer, fruBoardModel, fruBoardSerial,
+	)
+	return 1, nil
+}
+
 func markCollectorUp(ch chan<- prometheus.Metric, name string, up int) {
 	ch <- prometheus.MustNewConstMetric(
 		upDesc,
@@ -550,6 +637,8 @@ func (c collector) Collect(ch chan<- prometheus.Metric) {
 			up, _ = collectDCMI(ch, target)
 		case "bmc":
 			up, _ = collectBmcInfo(ch, target)
+		case "fru":
+			up, _ = collectFruInfo(ch, target)
 		case "chassis":
 			up, _ = collectChassisState(ch, target)
 		}
